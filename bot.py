@@ -6,7 +6,7 @@ import yt_dlp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8878225769:AAFJi-BIy5OKSI58_MhSRljQh-5-8UQHshs")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 DOWNLOAD_DIR = "downloads"
 MAX_TELEGRAM_SIZE_MB = 49  # Telegram bot upload limit is 50MB, 1MB buffer kept
 
@@ -76,6 +76,9 @@ def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
 
     output_template = os.path.join(chat_folder, "%(title)s [%(id)s].%(ext)s")
 
+    # Use cookies if available (required on cloud servers to bypass YouTube bot detection)
+    cookies_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': output_template,
@@ -90,6 +93,9 @@ def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
         'quiet': True,
         'logger': logger,      # route all warnings/errors into our logger instead of hiding them
     }
+
+    if os.path.isfile(cookies_file):
+        ydl_opts['cookiefile'] = cookies_file
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
@@ -171,8 +177,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    if BOT_TOKEN == "PASTE-YOUR-BOT-TOKEN-HERE":
-        raise SystemExit("Please put your actual BotFather token in the BOT_TOKEN variable first!")
+    if not BOT_TOKEN:
+        raise SystemExit("Error: BOT_TOKEN environment variable is not set!")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))

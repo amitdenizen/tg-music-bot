@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+downloads/
+Downloaded_Lectures/
+*.mp3
+*.mp4
+*.m4a
+*.part
+*.ytdl
+.env

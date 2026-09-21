@@ -59,20 +59,17 @@ class YTDLLogger:
         self.messages.append(f"ERROR: {msg}")
 
 
-def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
-    """Downloads audio from a YouTube video/playlist and converts it to MP3.
-    Returns the list of final MP3 file paths, in download order."""
-    downloaded_files = []
-
-    # Snapshot existing files so we can reliably detect newly downloaded MP3s
-    before_files = set(os.listdir(chat_folder)) if os.path.exists(chat_folder) else set()
+def download_audio_stream(url: str, chat_folder: str, logger: "YTDLLogger", queue: asyncio.Queue, loop: asyncio.AbstractEventLoop):
+    downloaded_files = set()
 
     def pp_hook(d):
         if d.get('status') == 'finished':
             info = d.get('info_dict', {})
             fp = info.get('filepath')
             if fp and fp.endswith('.mp3') and fp not in downloaded_files:
-                downloaded_files.append(fp)
+                downloaded_files.add(fp)
+                # Send the filepath back to the main async thread securely
+                loop.call_soon_threadsafe(queue.put_nowait, fp)
 
     output_template = os.path.join(chat_folder, "%(title)s [%(id)s].%(ext)s")
 
@@ -85,26 +82,21 @@ def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
             'preferredquality': '192',
         }],
         'postprocessor_hooks': [pp_hook],
-        'noplaylist': False,   # if a playlist link is given, the whole playlist gets downloaded
-        'ignoreerrors': True,  # if one video in the playlist fails, the rest still continue
+        'noplaylist': False,   # download whole playlist
+        'ignoreerrors': True,  # skip failed videos in playlist
         'quiet': True,
-        'logger': logger,      # route all warnings/errors into our logger instead of hiding them
-        # 'android' client is fast and works well on mobile residential IPs
+        'logger': logger,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    # Fallback / safety check: collect any newly generated .mp3 files in chat_folder
-    if os.path.exists(chat_folder):
-        for f in os.listdir(chat_folder):
-            if f.endswith('.mp3') and f not in before_files:
-                full_path = os.path.join(chat_folder, f)
-                if full_path not in downloaded_files and os.path.isfile(full_path):
-                    downloaded_files.append(full_path)
-
-    return downloaded_files
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        logger.error(f"yt-dlp error: {e}")
+    finally:
+        # Send a None marker to signal the download thread has completely finished
+        loop.call_soon_threadsafe(queue.put_nowait, None)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -116,29 +108,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    status_msg = await update.message.reply_text("⏳ Download started, please wait...")
+    status_msg = await update.message.reply_text("⏳ Download started, getting tracks...")
 
     chat_folder = os.path.join(DOWNLOAD_DIR, str(update.effective_chat.id))
     os.makedirs(chat_folder, exist_ok=True)
 
     logger = YTDLLogger()
+    queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
 
-    try:
-        files = await asyncio.to_thread(download_audio, text, chat_folder, logger)
-    except Exception as e:
-        details = "\n".join(logger.messages[-3:])
-        extra = f"\n\nDetails:\n{details}" if details else ""
-        await status_msg.edit_text(f"❌ Download failed: {e}{extra}")
-        return
+    # Start the downloading process in a background thread so it doesn't freeze the bot
+    dl_task = asyncio.to_thread(download_audio_stream, text, chat_folder, logger, queue, loop)
 
-    if not files:
-        details = "\n".join(logger.messages[-3:]) if logger.messages else "No details captured."
-        await status_msg.edit_text(f"❌ Couldn't download any audio.\n\nDetails:\n{details}")
-        return
+    tracks_sent = 0
+    while True:
+        # Wait until yt-dlp finishes downloading one song and pushes it to the queue
+        filepath = await queue.get()
+        
+        if filepath is None:
+            # yt-dlp finished the entire playlist
+            break
 
-    await status_msg.edit_text(f"✅ Got {len(files)} track(s), sending now...")
-
-    for filepath in files:
         try:
             size_mb = os.path.getsize(filepath) / (1024 * 1024)
             if size_mb > MAX_TELEGRAM_SIZE_MB:
@@ -161,15 +151,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         read_timeout=120,
                         write_timeout=120,
                     )
+                tracks_sent += 1
+
+                # Update the status message to show it's working through the playlist
+                try:
+                    await status_msg.edit_text(f"⏳ Downloading playlist... Sent {tracks_sent} track(s) so far.")
+                except:
+                    pass  # Ignore Telegram error if text is exactly the same
+                
                 await asyncio.sleep(1)  # small gap to avoid Telegram's flood limit
         except Exception as e:
-            # previously this error was silently swallowed - now it's reported
             await update.message.reply_text(f"⚠️ Couldn't send '{os.path.basename(filepath)}': {e}")
         finally:
             if os.path.exists(filepath):
-                os.remove(filepath)  # delete right away to save laptop storage
+                os.remove(filepath)  # delete immediately to save laptop/phone storage
 
-    await status_msg.edit_text("🎉 Done! All tracks have been sent.")
+    # Wait for the background thread to exit cleanly
+    await dl_task
+
+    if tracks_sent == 0:
+        details = "\n".join(logger.messages[-3:]) if logger.messages else "No details captured."
+        await status_msg.edit_text(f"❌ Couldn't download any audio.\n\nDetails:\n{details}")
+    else:
+        await status_msg.edit_text(f"🎉 Done! All {tracks_sent} track(s) have been sent.")
 
 
 def main():

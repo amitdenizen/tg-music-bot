@@ -92,6 +92,8 @@ def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
         'ignoreerrors': True,  # if one video in the playlist fails, the rest still continue
         'quiet': True,
         'logger': logger,      # route all warnings/errors into our logger instead of hiding them
+        # This bypasses the 'Sign in to confirm you're not a bot' error on Cloud Servers
+        'extractor_args': {'youtube': {'player_client': ['ios']}}
     }
 
     if os.path.isfile(cookies_file):

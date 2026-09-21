@@ -93,7 +93,7 @@ def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
         'quiet': True,
         'logger': logger,      # route all warnings/errors into our logger instead of hiding them
         # This bypasses the 'Sign in to confirm you're not a bot' error on Cloud Servers
-        'extractor_args': {'youtube': {'player_client': ['ios']}}
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
 
     if os.path.isfile(cookies_file):

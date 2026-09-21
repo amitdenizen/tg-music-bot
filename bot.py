@@ -2,7 +2,7 @@ import os
 import asyncio
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from pytubefix import YouTube, Playlist
+import yt_dlp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
@@ -60,31 +60,50 @@ class YTDLLogger:
 
 
 def download_audio(url: str, chat_folder: str, logger: "YTDLLogger") -> list:
-    """Downloads audio from a YouTube video/playlist using pytubefix.
-    Returns the list of final audio file paths, in download order."""
+    """Downloads audio from a YouTube video/playlist and converts it to MP3.
+    Returns the list of final MP3 file paths, in download order."""
     downloaded_files = []
 
-    try:
-        if 'playlist' in url.lower() or '&list=' in url.lower():
-            pl = Playlist(url)
-            videos = pl.videos
-        else:
-            videos = [YouTube(url)]
-            
-        for yt in videos:
-            try:
-                ys = yt.streams.get_audio_only()
-                if ys:
-                    file_path = ys.download(output_path=chat_folder)
-                    downloaded_files.append(file_path)
-                else:
-                    logger.warning(f"No audio stream found for {yt.video_id}")
-            except Exception as e:
-                logger.error(f"Failed to download video: {e}")
-                
-    except Exception as e:
-        logger.error(f"Failed to fetch metadata: {e}")
-        
+    # Snapshot existing files so we can reliably detect newly downloaded MP3s
+    before_files = set(os.listdir(chat_folder)) if os.path.exists(chat_folder) else set()
+
+    def pp_hook(d):
+        if d.get('status') == 'finished':
+            info = d.get('info_dict', {})
+            fp = info.get('filepath')
+            if fp and fp.endswith('.mp3') and fp not in downloaded_files:
+                downloaded_files.append(fp)
+
+    output_template = os.path.join(chat_folder, "%(title)s [%(id)s].%(ext)s")
+
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_template,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'postprocessor_hooks': [pp_hook],
+        'noplaylist': False,   # if a playlist link is given, the whole playlist gets downloaded
+        'ignoreerrors': True,  # if one video in the playlist fails, the rest still continue
+        'quiet': True,
+        'logger': logger,      # route all warnings/errors into our logger instead of hiding them
+        # 'android' client is fast and works well on mobile residential IPs
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    # Fallback / safety check: collect any newly generated .mp3 files in chat_folder
+    if os.path.exists(chat_folder):
+        for f in os.listdir(chat_folder):
+            if f.endswith('.mp3') and f not in before_files:
+                full_path = os.path.join(chat_folder, f)
+                if full_path not in downloaded_files and os.path.isfile(full_path):
+                    downloaded_files.append(full_path)
+
     return downloaded_files
 
 
